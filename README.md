@@ -12,6 +12,12 @@ interaction with a frontend, such as [Quadspace](https://github.com/SoRA-X7/Quad
 - Transposition-aware game tree
 - MCTS-inspired tree expansion
 
+## Compile
+
+- Can be compiled in normal rust way.
+- Can also compiled to WASM. Generate .wasm and .js by `wasm-pack build --no-typescript --target no-modules`. Check pkg/worker.js for usage.
+
+
 ## License
 
 Cold Clear 2 is licensed under either [Apache License Version 2.0](LICENSE-APACHE)
