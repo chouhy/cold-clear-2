@@ -4,6 +4,7 @@ use std::sync::Arc;
 use bot::{BotConfig, BotOptions};
 use enumset::EnumSet;
 use futures::prelude::*;
+use sync::BotSyncronizerWASM;
 use tbp::Randomizer;
 
 use crate::bot::Bot;
@@ -23,8 +24,6 @@ mod sync;
 use wasm_bindgen::prelude::*;
 use futures::channel::mpsc;
 use futures::StreamExt;
-use crate::tbp::MoveInfo;
-use crate::data::Placement;
 
 #[wasm_bindgen]
 pub struct Service {
@@ -37,17 +36,22 @@ impl Service {
     pub fn new() -> Service {
         let (sender, mut receiver) = mpsc::unbounded::<String>();
 
+        let bot = Arc::new(BotSyncronizerWASM::new());
+        let mut waiting_on_first_piece = None;
+        let worker = bot.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            worker.work_loop().await;
+        });
+
+        log(&serde_json::to_string(&BotMessage::Info {
+            name: "Cold Clear 2",
+            version: concat!(env!("CARGO_PKG_VERSION"), " ", env!("GIT_HASH")),
+            author: "MinusKelvin",
+            features: &[],
+        }).unwrap());
         wasm_bindgen_futures::spawn_local(async move {
             
-            log(&serde_json::to_string(&BotMessage::Info {
-                name: "Cold Clear 2",
-                version: concat!(env!("CARGO_PKG_VERSION"), " ", env!("GIT_HASH")),
-                author: "MinusKelvin",
-                features: &[],
-            }).unwrap());
 
-            let mut bot = None;
-            let mut waiting_on_first_piece = None;
             let config = Arc::new(BotConfig::default());
             while let Some(raw) = receiver.next().await {
                 let msg = serde_json::from_str::<FrontendMessage>(&raw).unwrap();
@@ -56,28 +60,20 @@ impl Service {
                         if start.hold.is_none() && start.queue.is_empty() {
                             waiting_on_first_piece = Some(start);
                         } else {
-                            // bot.start(create_bot(start, config.clone()));
-                            bot = Some(create_bot(start, config.clone()));
-                            if let Some(bot) = &mut bot {
-                                bot.do_work();
-                            }
+                            bot.start(create_bot(start, config.clone())).await;
                         }
                     }
                     FrontendMessage::Stop => {
-                        bot = None;
+                        bot.stop().await;
                         waiting_on_first_piece = None;
                     }
                     FrontendMessage::Suggest => {
-                        if let Some((moves, move_info)) = suggest_bot(&bot) {
+                        if let Some((moves, move_info)) = bot.suggest().await {
                             log(&serde_json::to_string(&BotMessage::Suggestion { moves, move_info }).unwrap());
                         }
                     }
                     FrontendMessage::Play { mv } => {
-                        if let Some(bot) = &mut bot {
-                            bot.advance(mv);
-                            bot.do_work();
-                        }
-                        puffin::GlobalProfiler::lock().new_frame();
+                        bot.advance(mv).await;
                     }
                     FrontendMessage::NewPiece { piece } => {
                         if let Some(mut start) = waiting_on_first_piece.take() {
@@ -88,12 +84,9 @@ impl Service {
                                 bag_state.remove(piece);
                             }
                             start.queue.push(piece);
-                            bot = Some(create_bot(start, config.clone()));
+                            bot.start(create_bot(start, config.clone())).await;
                         } else {
-                            if let Some(bot) = &mut bot {
-                                bot.new_piece(piece);
-                                bot.do_work();
-                            }
+                            bot.new_piece(piece).await;
                         }
                     }
                     FrontendMessage::Rules => {
@@ -214,19 +207,6 @@ fn create_bot(mut start: tbp::Start, config: Arc<BotConfig>) -> Bot {
     };
 
     Bot::new(BotOptions { speculate, config }, state, &start.queue)
-}
-
-
-fn suggest_bot(bot:&Option<Bot>) -> Option<(Vec<Placement>, MoveInfo)> {
-    bot.as_ref().map(|bot| {
-        let suggestion = bot.suggest();
-        let info = MoveInfo {
-            nodes: 0,
-            nps: 0.0,
-            extra: "".to_string(),
-        };
-        (suggestion, info)
-    })
 }
 
 fn spawn_workers(bot: &Arc<BotSyncronizer>) {
